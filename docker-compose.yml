@@ -1,0 +1,196 @@
+# ============================================================
+# Задача 29: Docker Compose стек
+# Запуск: docker compose up -d
+# Сервисы: bot, postgres+pgvector, redis, ollama,
+#          prometheus, grafana, jaeger
+# ============================================================
+
+version: "3.9"
+
+# ── Общая сеть ──────────────────────────────────────────────
+networks:
+  botnet:
+    driver: bridge
+
+# ── Постоянные тома ─────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+  prometheus_data:
+  grafana_data:
+
+services:
+
+  # ── Telegram бот ──────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: mcp_bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-botdb}
+      - DB_USER=${DB_USER:-botuser}
+      - DB_PASS=${DB_PASS:-botpass}
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MCP_SERVER_URL=http://mcp_sse:8000
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+    volumes:
+      - ./shared_files:/app/shared_files
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── PostgreSQL + pgvector ──────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mcp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-botdb}
+      POSTGRES_USER: ${DB_USER:-botuser}
+      POSTGRES_PASSWORD: ${DB_PASS:-botpass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-botuser} -d ${DB_NAME:-botdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis (кеш, rate-limit) ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: mcp_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Ollama (локальные LLM) ─────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mcp_ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+
+  # ── MCP SSE сервер ────────────────────────────────────────
+  mcp_sse:
+    build:
+      context: ./handlers/mcp_sse_server
+      dockerfile: Dockerfile
+    container_name: mcp_sse_server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-H", "Authorization: Bearer my_secret_mcp_token_2026", "http://localhost:8000/mcp/status"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+
+  # ── Jaeger (трассировка / flame-graph) ────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: mcp_jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # UI → http://localhost:16686
+      - "6831:6831/udp" # Thrift agent
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:16686/"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+
+  # ── Prometheus (метрики) ──────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: mcp_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+
+  # ── Grafana (дашборды) ────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: mcp_grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"    # UI → http://localhost:3000
+    depends_on:
+      - prometheus
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
