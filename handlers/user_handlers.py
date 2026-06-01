@@ -10,7 +10,7 @@ from utils.db_manager import db
 
 import groq
 import os
-import logging
+import structlog
 
 from services.benchmark_service import run_benchmark
 from services.model_manager_service import pull_model, list_models
@@ -20,7 +20,7 @@ from services.ollama_service import get_ollama_response, check_ollama_available
 private_mode_users: set = set()
 from services.rag_service import search_similar, load_sample_documents, add_document, init_db
 router = Router()
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 groq_client = groq.AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
 

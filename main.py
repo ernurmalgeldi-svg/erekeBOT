@@ -1,6 +1,4 @@
-"""
-Задача 28: main.py с structlog-логированием и OpenTelemetry трассировкой.
-"""
+
 import asyncio
 import os
 from dotenv import load_dotenv
