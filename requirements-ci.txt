@@ -40,7 +40,6 @@ google-api-python-client==2.197.0
 google-auth==2.53.0
 google-auth-httplib2==0.4.0
 google-auth-oauthlib==1.4.0
-googleapis-common-protos==1.59.1
 greenlet==3.5.1
 groq==1.2.0
 grpcio==1.80.0
